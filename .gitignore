@@ -1,0 +1,5 @@
+/build/
+/ios/Frameworks/
+/ios/NsgoPilotResources/
+/ios/*.xcodeproj/
+*.exe

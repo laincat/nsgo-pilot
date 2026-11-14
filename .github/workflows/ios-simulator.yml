@@ -1,0 +1,123 @@
+name: iOS simulator
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  simulator:
+    # AetherEngine 7.66 builds with Xcode 27, GitHub's xcode-27 image.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build the app as an iOS framework
+        run: |
+          go tool nsgo build -embed -target ios . > nsgo-build.log 2>&1 || { tail -40 nsgo-build.log; exit 1; }
+          fw=$(find . -name NsgoPilot.xcframework -type d -not -path './ios/*' | head -1)
+          res=$(find . -name NsgoPilotResources -type d -not -path './ios/*' | head -1)
+          echo "framework $fw, resources $res"
+          mkdir -p ios/Frameworks
+          cp -R "$fw" ios/Frameworks/
+          cp -R "$res" ios/NsgoPilotResources
+          # AetherEngine's LibDovi is a static XCFramework too: each slice's headers go
+          # into a folder of the module's name, so the two module maps do not collide.
+          for h in ios/Frameworks/NsgoPilot.xcframework/*/Headers; do
+            mkdir "$h/NsgoPilot"
+            find "$h" -maxdepth 1 -type f -exec mv {} "$h/NsgoPilot/" \;
+          done
+      - name: Build the host
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+          xcodebuild -project NsgoPilotHost.xcodeproj -scheme NsgoPilotHost -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath ../build/dd \
+            CODE_SIGNING_ALLOWED=NO build > ../xcodebuild.log 2>&1 || { grep -E 'error:' ../xcodebuild.log | head -20; tail -30 ../xcodebuild.log; exit 1; }
+      - name: Check the engine is linked dynamically
+        run: |
+          app=$(find build/dd/Build/Products -name NsgoPilotHost.app -type d | head -1)
+          fw=$(find build/dd/Build/Products -name PlayerEngineKit.framework -type d | head -1)
+          lib=$(find "$app" -maxdepth 1 -name '*.dylib' | head -1)
+          {
+            echo '### Dynamic link'
+            echo
+            echo '```'
+            echo '$ ls NsgoPilotHost.app/Frameworks'
+            ls "$app/Frameworks" || true
+            echo '$ ls PlayerEngineKit.framework'
+            ls "$fw" || true
+            echo '$ otool -L <app code> | grep -i aether'
+            otool -L "${lib:-$app/NsgoPilotHost}" | grep -i -E 'aether|PlayerEngineKit' || true
+            echo '$ otool -L PlayerEngineKit | grep -i libav'
+            otool -L "$fw/PlayerEngineKit" | grep -i libav || true
+            echo '$ nm -m PlayerEngineKit | grep _avcodec_open2'
+            nm -m "$fw/PlayerEngineKit" | grep _avcodec_open2 || true
+            echo '$ ls build products frameworks'
+            ls -d build/dd/Build/Products/Debug-iphonesimulator/*.framework 2>/dev/null || true
+            echo '$ artifacts'
+            find build/dd/SourcePackages/artifacts -maxdepth 4 -name '*.xcframework' 2>/dev/null | head -20 || true
+            echo '```'
+          } | tee dynamic-link.log
+          cat dynamic-link.log >> "$GITHUB_STEP_SUMMARY"
+          otool -L "${lib:-$app/NsgoPilotHost}" | grep -q PlayerEngineKit.framework
+          otool -L "$fw/PlayerEngineKit" | grep -q AetherLibavcodec.framework
+          ls "$app/Frameworks" | grep -q '^AetherLibavcodec.framework$'
+      - name: Run the path in the simulator
+        run: |
+          app=$(find build/dd -name NsgoPilotHost.app -type d | head -1)
+          # A new device of the image's first iPhone type and iOS runtime, not one of the image's own.
+          read -r runtime model <<< "$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(r + " " + x["deviceTypeIdentifier"] for r,l in d.items() if "iOS" in r for x in l if x["name"].startswith("iPhone")))')"
+          udid=$(xcrun simctl create pilot "$model" "$runtime")
+          echo "simulator $udid: $model on $runtime"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" "$app"
+          mkdir -p shots
+          SIMCTL_CHILD_NSGO_PILOT_PROBE=1 SIMCTL_CHILD_NSGO_PILOT_AUTO=1 \
+            xcrun simctl launch --console-pty --terminate-running-process "$udid" com.laincat.nsgopilot > app.log 2>&1 &
+          # A screenshot a few seconds after each step the app logs, then one of the playing episode.
+          seen=0
+          for _ in $(seq 1 240); do
+            sleep 1
+            steps=$(grep -c 'pilot: step' app.log || true)
+            if [ "$steps" -gt "$seen" ]; then
+              seen=$steps
+              sleep 2
+              name=$(grep 'pilot: step' app.log | sed -n "${steps}p" | tr -d '\r' | sed 's/.*pilot: step //; s/ /-/g')
+              xcrun simctl io "$udid" screenshot "shots/$steps-$name.png" > /dev/null 2>&1
+            fi
+            if grep -q 'player state: playing' app.log; then
+              sleep 6
+              xcrun simctl io "$udid" screenshot "shots/$((steps + 1))-playing.png" > /dev/null 2>&1
+              break
+            fi
+          done
+          xcrun simctl terminate "$udid" com.laincat.nsgopilot || true
+          grep 'pilot:' app.log | tee pilot.log
+          { echo '```'; cat pilot.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fail=0
+          for want in 'login step: ok' 'login probe: .*HttpOnly 1' 'page 1 decoded' 'aether state playing'; do
+            if grep -q "$want" pilot.log; then echo "ok: $want"; else echo "##[error]missing: $want"; fail=1; fi
+          done
+          exit $fail
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: ios-simulator
+          path: |
+            shots/
+            app.log
+            nsgo-build.log
+            xcodebuild.log
+            dynamic-link.log
+
+
+
+
+
+
+
+
