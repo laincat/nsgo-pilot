@@ -6,7 +6,7 @@ The shortest path through VeneraCat Core on [NSGo](https://nsgo.dev/), on its ow
 
 - Core compiled into the app: the source list and installs, search, details and a full-size reader.
 - Browser login: NSGo's system web view shows the login page; Core's `webcookie` package reads the cookies, HttpOnly ones included, from the system store (WebView2 on Windows, WKWebsiteDataStore on iOS) into the source's partition before `onLoginSuccess`.
-- Playback on iOS: `ios/` is the Swift host that registers AetherEngine 7.66.1 as the `aether.player` native component. The engine sits in `PlayerEngineKit`, a dynamic framework of its own that the app links at run time: AetherEngine is LGPL-3.0 and ships dynamically linked, so a modified engine replaces it without rebuilding the app.
+- Playback on iOS: `ios/` is the Swift host that registers AetherEngine as the `aether.player` native component. The engine sits in `PlayerEngineKit`, a dynamic framework of its own that the app links at run time: AetherEngine is LGPL-3.0 and ships dynamically linked, so a modified engine replaces it without rebuilding the app.
 - The floating tab bar uses Liquid Glass (from iOS 26 / macOS 26), with icons from nsgo-icons-kubai.
 
 ## Running

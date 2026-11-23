@@ -6,14 +6,14 @@ on:
 
 jobs:
   simulator:
-    # AetherEngine 7.66 builds with Xcode 27, GitHub's xcode-27 image.
+    # AetherEngine builds with Xcode 27, GitHub's xcode-27 image.
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
       - name: Build the app as an iOS framework
         run: |
           go tool nsgo build -embed -target ios . > nsgo-build.log 2>&1 || { tail -40 nsgo-build.log; exit 1; }
@@ -103,7 +103,7 @@ jobs:
             if grep -q "$want" pilot.log; then echo "ok: $want"; else echo "##[error]missing: $want"; fail=1; fi
           done
           exit $fail
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ios-simulator

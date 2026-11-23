@@ -6,7 +6,7 @@
 
 - Core 直接编进 App：源列表与安装、搜索、详情、大图阅读器。
 - 网页登录：登录页由 NSGo 的系统网页视图显示，Cookie（含 HttpOnly）由 Core 的 `webcookie` 包从系统存储读取（Windows：WebView2；iOS：WKWebsiteDataStore），写入源的分区后再调用 `onLoginSuccess`。
-- iOS 播放：`ios/` 是 Swift 外壳，把 AetherEngine 7.66.1 注册成 `aether.player` 原生组件。引擎装在独立的动态框架 `PlayerEngineKit` 里，App 只在运行期链接它：AetherEngine 是 LGPL-3.0 且官方要求动态链接，这样换一个改过的引擎不用重编 App。
+- iOS 播放：`ios/` 是 Swift 外壳，把 AetherEngine 注册成 `aether.player` 原生组件。引擎装在独立的动态框架 `PlayerEngineKit` 里，App 只在运行期链接它：AetherEngine 是 LGPL-3.0 且官方要求动态链接，这样换一个改过的引擎不用重编 App。
 - 底部浮动标签栏用 Liquid Glass 材质（iOS 26 / macOS 26 起生效），图标来自 nsgo-icons-kubai。
 
 ## 运行
