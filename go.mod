@@ -52,3 +52,6 @@ require (
 )
 
 tool github.com/nsgo-dev/nsgo/cmd/nsgo
+
+// Local Wave 2A integration. Drop after Core is published and the require is updated.
+replace github.com/laincat/veneracat-core => "../VeneraCat Core"

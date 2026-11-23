@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laincat/veneracat-core/gohost/library"
 	"github.com/laincat/veneracat-core/plugin"
 	"github.com/laincat/veneracat-core/subscription"
 	"github.com/nsgo-dev/nsgo/core"
@@ -21,6 +22,20 @@ var installKinds = []struct {
 	{"Kazumi 规则", plugin.TypeKazumi},
 }
 
+type indexSnapshot struct {
+	url  string
+	rows []subscription.Row
+}
+
+type indexSelection struct {
+	url   string
+	entry subscription.Entry
+}
+
+func (selection indexSelection) install(ctx context.Context, lib *library.Library) (*plugin.Record, error) {
+	return lib.InstallEntry(ctx, selection.entry, selection.url)
+}
+
 // sourcesTab installs sources from the official index or a script's address
 // and lists what is installed, with a browser login for comic sources.
 func sourcesTab(cx *core.Scope, a *App, push func(route)) core.Node {
@@ -29,8 +44,7 @@ func sourcesTab(cx *core.Scope, a *App, push func(route)) core.Node {
 	kind := core.NewSignal(cx, 0)
 	status := core.NewSignal(cx, "")
 	busy := core.NewSignal(cx, false)
-	entries := core.NewSignalFunc[[]subscription.Row](cx, nil, nil)
-	indexURL := ""
+	index := core.NewSignalFunc(cx, indexSnapshot{}, nil)
 
 	run := func(what string, f func(ctx context.Context) (string, error)) {
 		busy.Set(true)
@@ -51,13 +65,21 @@ func sourcesTab(cx *core.Scope, a *App, push func(route)) core.Node {
 	}
 	readIndex := func() {
 		u := strings.TrimSpace(address.Get())
-		run("正在读取订阅…", func(ctx context.Context) (string, error) {
+		busy.Set(true)
+		status.Set("正在读取订阅…")
+		load(cx, func(ctx context.Context) (indexSnapshot, error) {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
 			_, rows, err := a.Lib.Index(ctx, u)
+			return indexSnapshot{url: u, rows: rows}, err
+		}, func(snapshot indexSnapshot, err error) {
+			busy.Set(false)
 			if err != nil {
-				return "", err
+				status.Set(err.Error())
+				return
 			}
-			cx.Post(func() { indexURL = u; entries.Set(rows) })
-			return fmt.Sprintf("订阅里有 %d 个源", len(rows)), nil
+			index.Set(snapshot)
+			status.Set(fmt.Sprintf("订阅里有 %d 个源", len(snapshot.rows)))
 		})
 	}
 	installURL := func() {
@@ -71,9 +93,9 @@ func sourcesTab(cx *core.Scope, a *App, push func(route)) core.Node {
 			return "已安装 " + rec.Name, nil
 		})
 	}
-	installEntry := func(e subscription.Entry) {
-		run("正在安装 "+e.Name+"…", func(ctx context.Context) (string, error) {
-			rec, err := a.Lib.InstallEntry(ctx, e, indexURL)
+	installEntry := func(selection indexSelection) {
+		run("正在安装 "+selection.entry.Name+"…", func(ctx context.Context) (string, error) {
+			rec, err := selection.install(ctx, a.Lib)
 			if err != nil {
 				return "", err
 			}
@@ -131,18 +153,23 @@ func sourcesTab(cx *core.Scope, a *App, push func(route)) core.Node {
 			}
 			return core.View{Children: rows}
 		}),
-		core.Show{When: func() bool { return len(entries.Get()) > 0 }, Then: func(cx *core.Scope) core.Node {
+		core.Dynamic(func(cx *core.Scope) core.Node {
+			snapshot := index.Get()
+			if len(snapshot.rows) == 0 {
+				return core.View{}
+			}
 			rows := []core.Node{heading(cx, "订阅中的源")}
-			for _, e := range entries.Get() {
+			for _, e := range snapshot.rows {
+				selection := indexSelection{url: snapshot.url, entry: e.Entry}
 				rows = append(rows, row(cx, nil,
 					column(2,
 						ui.Text(e.Name, 15, ui.Medium, colors.Text),
 						ui.Text(fmt.Sprintf("%s · %s · %s", e.Key, e.Version, e.Status), 12, ui.Regular, colors.Muted),
 					),
-					ui.Button{Text: "安装", Variant: ui.ButtonGhost, Disabled: disabled, OnPress: func() { installEntry(e.Entry) }},
+					ui.Button{Text: "安装", Variant: ui.ButtonGhost, Disabled: disabled, OnPress: func() { installEntry(selection) }},
 				))
 			}
 			return core.View{Style: core.Style{Gap: 4}, Children: rows}
-		}},
+		}),
 	}}}}
 }

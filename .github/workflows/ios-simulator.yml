@@ -78,20 +78,19 @@ jobs:
           mkdir -p shots
           SIMCTL_CHILD_NSGO_PILOT_PROBE=1 SIMCTL_CHILD_NSGO_PILOT_AUTO=1 \
             xcrun simctl launch --console-pty --terminate-running-process "$udid" com.laincat.nsgopilot > app.log 2>&1 &
-          # A screenshot a few seconds after each step the app logs, then one of the playing episode.
           seen=0
-          for _ in $(seq 1 240); do
+          for _ in $(seq 1 210); do
             sleep 1
             steps=$(grep -c 'pilot: step' app.log || true)
             if [ "$steps" -gt "$seen" ]; then
               seen=$steps
-              sleep 2
-              name=$(grep 'pilot: step' app.log | sed -n "${steps}p" | tr -d '\r' | sed 's/.*pilot: step //; s/ /-/g')
-              xcrun simctl io "$udid" screenshot "shots/$steps-$name.png" > /dev/null 2>&1
+              xcrun simctl io "$udid" screenshot "shots/step-$steps.png" > /dev/null 2>&1
             fi
-            if grep -q 'player state: playing' app.log; then
-              sleep 6
-              xcrun simctl io "$udid" screenshot "shots/$((steps + 1))-playing.png" > /dev/null 2>&1
+            if grep -q 'pilot: complete' app.log; then
+              xcrun simctl io "$udid" screenshot shots/playing.png > /dev/null 2>&1
+              break
+            fi
+            if grep -q 'pilot: failed' app.log; then
               break
             fi
           done
@@ -99,7 +98,7 @@ jobs:
           grep 'pilot:' app.log | tee pilot.log
           { echo '```'; cat pilot.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fail=0
-          for want in 'login step: ok' 'login probe: .*HttpOnly 1' 'page 1 decoded' 'aether state playing'; do
+          for want in 'login step: ok' 'login probe: .*HttpOnly 1' 'details step: ok' 'page 1 decoded' 'playback step: ok' 'pilot: complete'; do
             if grep -q "$want" pilot.log; then echo "ok: $want"; else echo "##[error]missing: $want"; fail=1; fi
           done
           exit $fail

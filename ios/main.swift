@@ -5,7 +5,7 @@ import PlayerEngineKit
 import UIKit
 
 /// The app's player element: props url and headers (name to value); it emits
-/// "state" with the engine's state and "error" with a failed load's message.
+/// "state", the first advancing playback time, and failed loads.
 /// NSGo calls it on the main thread.
 final class AetherComponent: NSObject, NSGoComponent {
     let context: NSGoComponentContext
@@ -13,7 +13,9 @@ final class AetherComponent: NSObject, NSGoComponent {
     private var url: String?
     private var headers: [String: String] = [:]
     private var loaded: String?
+    private var loadedHeaders: [String: String] = [:]
     private var scheduled = false
+    private var destroyed = false
 
     init(_ context: NSGoComponentContext) {
         self.context = context
@@ -36,6 +38,9 @@ final class AetherComponent: NSObject, NSGoComponent {
                 print("pilot: aether error \(message)")
                 self?.context.emit("error", message)
             }
+            player.onProgress = { [weak self] seconds in
+                self?.context.emit("progress", seconds)
+            }
             self.player = player
             return player
         }
@@ -57,14 +62,20 @@ final class AetherComponent: NSObject, NSGoComponent {
     }
 
     private func start() {
-        guard let url, url != loaded, let address = URL(string: url), let player = make() else { return }
+        guard !destroyed, let url, url != loaded || headers != loadedHeaders,
+              let address = URL(string: url), let player = make() else { return }
         loaded = url
+        loadedHeaders = headers
         let headers = headers
         MainActor.assumeIsolated { player.load(url: address, headers: headers) }
     }
 
     func destroy() {
+        destroyed = true
         MainActor.assumeIsolated { [player] in
+            player?.onState = nil
+            player?.onError = nil
+            player?.onProgress = nil
             player?.stop()
         }
         player = nil

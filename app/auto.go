@@ -2,55 +2,120 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"runtime"
+	"strings"
 	"time"
+
+	"github.com/nsgo-dev/nsgo/core"
 )
 
-// autopilot walks the whole path by itself when NSGO_PILOT_AUTO is set, for a
-// simulator nobody taps: the tabs, the probe's browser login, its details and
-// chapter, a real source from the official index searched and read, then the
-// probe's episode in the host's player. Each page logs what it got.
-func autopilot(cx interface{ Post(func()) }, a *App, nav interface {
+func autopilot(ctx context.Context, cx *core.Scope, a *App, nav interface {
 	Push(route)
 	PopToRoot()
-}, tab interface{ Set(int) }) {
-	step := func(wait time.Duration, what string, f func()) {
-		time.Sleep(wait)
+}) {
+	if runtime.GOOS == "windows" {
+		defer func() {
+			a.close()
+			cx.Post(cx.RequestQuit)
+		}()
+	}
+	step := func(what string, next route, result <-chan error) bool {
 		log.Printf("pilot: step %s", what)
-		cx.Post(f)
+		cx.Post(func() { nav.PopToRoot(); nav.Push(next) })
+		timer := time.NewTimer(45 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			log.Printf("pilot: failed %s: timed out", what)
+			return false
+		case err := <-result:
+			if err != nil {
+				log.Printf("pilot: failed %s: %v", what, err)
+				return false
+			}
+			log.Printf("pilot: %s step: ok", what)
+			return true
+		}
 	}
-	step(4*time.Second, "search tab", func() { tab.Set(1) })
-	step(6*time.Second, "video tab", func() { tab.Set(2) })
-	step(6*time.Second, "sources tab", func() { tab.Set(0) })
-	step(6*time.Second, "login probe", func() { nav.Push(route{Kind: "login", Key: "probe", Title: "探针漫画"}) })
-	// The page loads when it loads: go on when the login reports, not on a guess.
-	select {
-	case result := <-a.login:
-		log.Printf("pilot: login step: %s", result)
-	case <-time.After(45 * time.Second):
-		log.Printf("pilot: login step: no result in 45s")
+	if !step("login", route{Kind: "login", Key: "probe", Title: "探针漫画"}, a.probe.login) {
+		return
 	}
-	step(0, "details probe", func() {
-		nav.PopToRoot()
-		nav.Push(route{Kind: "detail", Key: "probe", ID: "1", Title: "探针漫画"})
-	})
-	step(6*time.Second, "reader probe", func() { nav.Push(route{Kind: "reader", Key: "probe", ID: "1", Episode: "c1", Title: "第一话"}) })
+	if !step("details", route{Kind: "detail", Key: "probe", ID: "1", Title: "探针漫画"}, a.probe.details) {
+		return
+	}
+	if !step("reader", route{Kind: "reader", Key: "probe", ID: "1", Episode: "c1", Title: "第一话"}, a.probe.reader) {
+		return
+	}
+	if !step("playback", route{Kind: "play", Key: "probe_video", ID: "fixture", Line: "l1", Episode: "e1", Title: "回环 HLS"}, a.probe.playback) {
+		return
+	}
+	log.Print("pilot: complete")
+	if os.Getenv("NSGO_PILOT_LIVE") != "" {
+		live, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if found, ok := realComic(live, a, "Komiic", "海賊王"); ok {
+			cx.Post(func() { nav.PopToRoot(); nav.Push(found) })
+		}
+	}
+}
 
-	time.Sleep(8 * time.Second)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if r, ok := realComic(ctx, a, "Komiic", "海賊王"); ok {
-		step(0, "details Komiic", func() {
-			nav.PopToRoot()
-			nav.Push(route{Kind: "detail", Key: r.Key, ID: r.ID, Title: r.Title})
-		})
-		step(8*time.Second, "reader Komiic", func() { nav.Push(r) })
-		time.Sleep(15 * time.Second)
+func reportProbe(result chan<- error, err error) {
+	select {
+	case result <- err:
+	default:
 	}
-	step(0, "play probe_video", func() {
-		nav.PopToRoot()
-		nav.Push(route{Kind: "play", Key: "probe_video", ID: "bipbop", Line: "l1", Episode: "e1", Title: "Apple HLS 示例 第1集"})
-	})
+}
+
+func verifyProbeMedia(ctx context.Context, a *App, master string) error {
+	read := func(address, byteRange string, wantedStatus int) ([]byte, error) {
+		headers := http.Header{}
+		if byteRange != "" {
+			headers.Set("Range", byteRange)
+		}
+		resp, err := a.Core.OpenVideoMedia(ctx, "probe_video", address, headers)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != wantedStatus {
+			return nil, fmt.Errorf("media HTTP %d, want %d", resp.StatusCode, wantedStatus)
+		}
+		return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	}
+	base, err := url.Parse(master)
+	if err != nil {
+		return err
+	}
+	masterBytes, err := read(master, "", http.StatusOK)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(string(masterBytes), "main.m3u8") {
+		return fmt.Errorf("probe master has no media playlist")
+	}
+	playlist, err := read(base.JoinPath("..", "main.m3u8").String(), "", http.StatusOK)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(string(playlist), "stream.mp4") {
+		return fmt.Errorf("probe playlist has no media segments")
+	}
+	segment, err := read(base.JoinPath("..", "stream.mp4").String(), "bytes=0-31", http.StatusPartialContent)
+	if err != nil {
+		return err
+	}
+	if len(segment) != 32 || !strings.Contains(string(segment), "ftyp") {
+		return fmt.Errorf("probe range did not return the MP4 header")
+	}
+	return nil
 }
 
 // realComic installs key from the official index, searches it and returns the

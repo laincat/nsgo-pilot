@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	vc "github.com/laincat/nsgo-pilot/internal/core"
-	"github.com/laincat/veneracat-core/webcookie"
+	vc "github.com/laincat/veneracat-core/gohost"
+	"github.com/laincat/veneracat-core/host"
 	"github.com/nsgo-dev/nsgo/base"
 	"github.com/nsgo-dev/nsgo/core"
 	"github.com/nsgo-dev/nsgo/ui"
@@ -27,79 +27,99 @@ func loginPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 	decl := core.NewSignalFunc(cx, vc.WebviewLogin{}, nil)
 	status := core.NewSignal(cx, "正在读取登录方式…")
 	current := core.NewSignal(cx, "")
+	var latest core.WebNavigation
+	var attempt context.CancelFunc
+	var generation uint64
 	finished := false
-
-	load(cx, func(ctx context.Context) (vc.WebviewLogin, error) { return a.Core.AccountWebviewLogin(ctx, r.Key) }, func(d vc.WebviewLogin, err error) {
-		switch {
-		case err != nil:
-			status.Set("读取失败：" + err.Error())
-		case d.URL == "" || d.Handle == "":
-			status.Set("这个源没有网页登录")
-		default:
-			decl.Set(d)
-			status.Set("请在页面里登录")
+	reader := readBrowserCookies(cx)
+	fixture := a.probe != nil && r.Key == "probe"
+	if fixture {
+		read := reader
+		reader = func(ctx context.Context, raw string) ([]*http.Cookie, error) {
+			rows, err := read(ctx, raw)
+			return slices.DeleteFunc(rows, func(row *http.Cookie) bool { return row.Name != a.probe.cookieName }), err
 		}
-	})
-
-	complete := func(d vc.WebviewLogin, pageURL string) {
-		status.Set("源确认已登录，正在读取 Cookie…")
-		load(cx, func(ctx context.Context) (string, error) {
-			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			seen := map[string]bool{}
-			httpOnly := 0
-			for _, u := range distinct(d.URL, pageURL) {
-				cookies, err := webcookie.Read(ctx, u, a.cookies)
-				log.Printf("pilot: webcookie %s: %d cookies, %v", u, len(cookies), err)
-				if err != nil {
-					return "", err
-				}
-				a.Core.Jar().Set(vc.ComicPartition(r.Key), u, cookies)
-				for _, c := range cookies {
-					id := c.Name + ";" + c.Domain + ";" + c.Path
-					if !seen[id] && c.HttpOnly {
-						httpOnly++
+	}
+	ctx := cx.Context()
+	if a.loginActive {
+		status.Set(errLoginAlreadyOpen.Error())
+	} else {
+		a.loginActive = true
+		cx.Cleanup(func() { a.loginActive = false })
+		load(cx, func(ctx context.Context) (vc.WebviewLogin, error) { return a.Core.AccountWebviewLogin(ctx, r.Key) }, func(d vc.WebviewLogin, err error) {
+			switch {
+			case err != nil:
+				status.Set("读取失败：" + err.Error())
+				a.reportLogin(r.Key, err)
+			case d.URL == "" || d.Handle == "":
+				status.Set("这个源没有网页登录")
+			default:
+				ready := func(err error) {
+					if err != nil {
+						status.Set("浏览器登录状态清理失败：" + err.Error())
+						a.reportLogin(r.Key, err)
+						return
 					}
-					seen[id] = true
+					decl.Set(d)
+					status.Set("请在页面里登录")
+				}
+				if fixture {
+					ready(nil)
+				} else {
+					cx.ClearWebsiteData(ready)
 				}
 			}
-			total := len(seen)
-			if err := a.Core.WebviewLoginDone(ctx, r.Key, d.Handle); err != nil {
-				return "", fmt.Errorf("Cookie 已保存 %d 个，但 onLoginSuccess 失败：%w", total, err)
-			}
-			return fmt.Sprintf("登录完成：Core 读到并保存了 %d 个 Cookie，其中 HttpOnly %d 个", total, httpOnly), nil
-		}, func(done string, err error) {
-			if err != nil {
-				log.Printf("pilot: login %s failed: %v", r.Key, err)
-				a.logged(err.Error())
-				status.Set(err.Error())
-				return
-			}
-			log.Printf("pilot: login %s: %s", r.Key, done)
-			a.logged("ok")
-			status.Set(done)
 		})
 	}
+
 	navigated := func(nav core.WebNavigation) {
-		current.Set(nav.URL)
-		log.Printf("pilot: login page %q title %q loading %v", nav.URL, nav.Title, nav.Loading)
-		d := decl.Get()
-		if finished || d.Handle == "" || nav.Loading {
+		if finished || (nav.URL == latest.URL && nav.Title == latest.Title && nav.Loading == latest.Loading) {
 			return
 		}
-		load(cx, func(ctx context.Context) (bool, error) {
-			return a.Core.WebviewStatus(ctx, r.Key, d.Handle, nav.URL, nav.Title)
-		}, func(ok bool, err error) {
-			if err != nil {
-				status.Set("checkStatus 失败：" + err.Error())
+		latest = nav
+		current.Set(nav.URL)
+		generation++
+		if attempt != nil {
+			attempt()
+		}
+		d := decl.Get()
+		if d.Handle == "" || nav.Loading || host.ValidateURL(nav.URL) != nil {
+			return
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		attempt = cancel
+		ticket := generation
+		go func() {
+			defer cancel()
+			ok, err := a.Core.WebviewStatus(checkCtx, r.Key, d.Handle, nav.URL, nav.Title)
+			if !ok && err == nil {
 				return
 			}
-			log.Printf("pilot: checkStatus %q: %v", nav.Title, ok)
-			if ok && !finished {
-				finished = true
-				complete(d, nav.URL)
+			var result loginResult
+			if err == nil {
+				result, err = finishLogin(checkCtx, reader, []string{d.URL, nav.URL}, func(rows []*http.Cookie) error {
+					return a.Core.Jar().Import(vc.ComicPartition(r.Key), rows)
+				}, func(ctx context.Context) error { return a.Core.WebviewLoginDone(ctx, r.Key, d.Handle) }, 150*time.Millisecond)
 			}
-		})
+			cx.Post(func() {
+				if ticket != generation || ctx.Err() != nil {
+					return
+				}
+				finished = result.saved
+				if err != nil {
+					status.Set(err.Error())
+					a.reportLogin(r.Key, err)
+					return
+				}
+				message := fmt.Sprintf("登录完成：Core 读到并保存了 %d 个 Cookie，其中 HttpOnly %d 个", result.total, result.httpOnly)
+				if fixture {
+					cx.SetWebCookies([]core.WebCookie{{Name: a.probe.cookieName, Domain: "127.0.0.1", Path: "/", Expires: time.Now().Add(-time.Minute)}}, nil)
+				}
+				log.Printf("pilot: login %s: %s", r.Key, message)
+				status.Set(message)
+				a.reportLogin(r.Key, nil)
+			})
+		}()
 	}
 	// inspect shows what Core reads for the current page, names only.
 	inspect := func() {
@@ -110,7 +130,7 @@ func loginPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 		load(cx, func(ctx context.Context) ([]*http.Cookie, error) {
 			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			return webcookie.Read(ctx, u, a.cookies)
+			return reader(ctx, u)
 		}, func(cookies []*http.Cookie, err error) {
 			if err != nil {
 				status.Set("读取 Cookie 失败：" + err.Error())
@@ -140,7 +160,9 @@ func loginPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 				return core.WebView{
 					Source:                  core.WebSource{Src: decl.Get().URL},
 					InjectedJavaScript:      pageScript,
-					OnMessage:               func(data string) { pageLoaded(data, navigated) },
+					MessageOrigins:          []string{"*"},
+					OnMessage:               func(data string) { pageLoaded(data, latest, navigated) },
+					OnLoadStart:             navigated,
 					OnNavigationStateChange: navigated,
 					OnLoad:                  navigated,
 					Style:                   core.Style{FlexGrow: 1},
@@ -155,37 +177,19 @@ func loginPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 // checkStatus often decides by the title.
 const pageScript = "window.nsgo.postMessage(JSON.stringify({pilotPage: location.href, title: document.title}))"
 
-// pageLoaded hands what pageScript posted to navigated.
-func pageLoaded(data string, navigated func(core.WebNavigation)) {
+func pageLoaded(data string, latest core.WebNavigation, navigated func(core.WebNavigation)) {
 	var page struct {
 		URL   string `json:"pilotPage"`
 		Title string `json:"title"`
 	}
-	if json.Unmarshal([]byte(data), &page) == nil && page.URL != "" {
-		navigated(core.WebNavigation{URL: page.URL, Title: page.Title})
+	if json.Unmarshal([]byte(data), &page) == nil && page.URL == latest.URL && !latest.Loading && page.Title != "" {
+		latest.Title = page.Title
+		navigated(latest)
 	}
 }
 
-// logged reports a web view login's result to the autopilot, if it is
-// running; a second report is dropped rather than waited on.
-func (a *App) logged(result string) {
-	select {
-	case a.login <- result:
-	default:
+func (a *App) reportLogin(key string, err error) {
+	if a.probe != nil && key == "probe" {
+		reportProbe(a.probe.login, err)
 	}
-}
-
-// distinct returns the addresses, each once, without an empty one.
-func distinct(addresses ...string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, a := range addresses {
-		u, err := url.Parse(a)
-		if a == "" || err != nil || seen[u.Scheme+"://"+u.Host+u.Path] {
-			continue
-		}
-		seen[u.Scheme+"://"+u.Host+u.Path] = true
-		out = append(out, a)
-	}
-	return out
 }

@@ -4,15 +4,26 @@
 
 The shortest path through VeneraCat Core on [NSGo](https://nsgo.dev/), on its own, without touching Nekularity or Nekophage.
 
-- Core compiled into the app: the source list and installs, search, details and a full-size reader.
-- Browser login: NSGo's system web view shows the login page; Core's `webcookie` package reads the cookies, HttpOnly ones included, from the system store (WebView2 on Windows, WKWebsiteDataStore on iOS) into the source's partition before `onLoginSuccess`.
-- Playback on iOS: `ios/` is the Swift host that registers AetherEngine as the `aether.player` native component. The engine sits in `PlayerEngineKit`, a dynamic framework of its own that the app links at run time: AetherEngine is LGPL-3.0 and ships dynamically linked, so a modified engine replaces it without rebuilding the app.
-- The floating tab bar uses Liquid Glass (from iOS 26 / macOS 26), with icons from nsgo-icons-kubai.
+- Go uses Core's optional `gohost` for comic and video sources. The regular profile stays under the app data directory at `core/`. The source API level is `1.6.3`.
+- Browser login uses NSGo's native WebView and reads HttpOnly cookies from its native cookie store. The pilot waits for cookies, saves them together in the source partition and then calls `onLoginSuccess`.
+- The iOS host registers AetherEngine as `aether.player` in the dynamic `PlayerEngineKit` framework. NSGo's native tab bar uses Liquid Glass with icons from nsgo-icons-kubai.
 
 ## Running
 
-- Windows: `go build -o pilot.exe .`; `NSGO_PILOT_PROBE=1` also installs loopback probe sources (a login page, a comic, an HLS episode), and `NSGO_PILOT_AUTO=1` walks the whole path by itself, logging `pilot:` lines.
-- iOS Simulator: `.github/workflows/ios-simulator.yml` on the `xcode-27` image builds the XCFramework with `go tool nsgo build -embed -target ios .`, generates the host with XcodeGen, and runs the path in a simulator with screenshots.
+- On Windows, build with `go build -o pilot.exe .`. Set `NSGO_PILOT_PROBE=1` to use a temporary profile and loopback sources. Set `NSGO_PILOT_AUTO=1` to check native login, details, full image decode, both HLS playlists and a media byte range. Success is logged as `pilot: complete`.
+- The iOS simulator workflow calls `go tool nsgo build -embed -target ios .`, generates the Swift host, and waits for playback time to advance. Set `NSGO_PILOT_LIVE=1` to run a live source diagnostic after the offline path.
+
+## Cookie-backed playback
+
+Swift's native player currently receives the playback URL and declared request headers. Video that depends on the source cookie partition requires a Go media proxy or equivalent transport integration in Swift. The transport must match partition cookies for each redirect and media URL, carry Range requests and cancel on playback closure.
+
+## Local Core integration
+
+The temporary replace in `go.mod` reads the shared host from the sibling `../VeneraCat Core` checkout. Before publishing the pilot, push Core first, drop the local replace and update to the Go pseudo-version of the published revision.
+
+## Offline media fixture
+
+`app/testdata/hls` reuses Nekophage’s fMP4 HLS clip. The picture is **Big Buck Bunny**, © 2008 Blender Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The derivative scales, compresses and segments the clip and has no audio track.
 
 ## License
 

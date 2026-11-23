@@ -4,15 +4,26 @@
 
 用 [NSGo](https://nsgo.dev/) 单独验证 VeneraCat Core 的最短主线，不改 Nekularity 和 Nekophage。
 
-- Core 直接编进 App：源列表与安装、搜索、详情、大图阅读器。
-- 网页登录：登录页由 NSGo 的系统网页视图显示，Cookie（含 HttpOnly）由 Core 的 `webcookie` 包从系统存储读取（Windows：WebView2；iOS：WKWebsiteDataStore），写入源的分区后再调用 `onLoginSuccess`。
-- iOS 播放：`ios/` 是 Swift 外壳，把 AetherEngine 注册成 `aether.player` 原生组件。引擎装在独立的动态框架 `PlayerEngineKit` 里，App 只在运行期链接它：AetherEngine 是 LGPL-3.0 且官方要求动态链接，这样换一个改过的引擎不用重编 App。
-- 底部浮动标签栏用 Liquid Glass 材质（iOS 26 / macOS 26 起生效），图标来自 nsgo-icons-kubai。
+- Go 端通过 Core 的 `gohost` 装配漫画源和视频源，普通资料仍使用应用资料目录下的 `core/`。源 API 级别为 `1.6.3`。
+- 网页登录由 NSGo 的原生 WebView 提供。试点从原生 Cookie 存储读取 HttpOnly Cookie，等待 Cookie 到齐，汇总写入源分区后执行 `onLoginSuccess`。
+- iOS 外壳把 AetherEngine 注册为 `aether.player`，使用独立的 `PlayerEngineKit` 动态框架。NSGo 原生标签栏使用 Liquid Glass，图标来自 nsgo-icons-kubai。
 
 ## 运行
 
-- Windows：`go build -o pilot.exe .`；设置 `NSGO_PILOT_PROBE=1` 会额外安装本机回环探针源（登录页、漫画、HLS 视频），`NSGO_PILOT_AUTO=1` 会自动走完整条路径并在日志里输出 `pilot:` 行。
-- iOS 模拟器：见 `.github/workflows/ios-simulator.yml`（`xcode-27` 镜像）：`go tool nsgo build -embed -target ios .` 产出 XCFramework，XcodeGen 生成外壳工程，启动模拟器自动驾驶并截图。
+- Windows 用 `go build -o pilot.exe .` 构建。设置 `NSGO_PILOT_PROBE=1` 使用临时资料与回环源。设置 `NSGO_PILOT_AUTO=1` 依次验证网页登录、详情、真实图片解码与 HLS 清单和媒体字节范围。日志以 `pilot: complete` 表示成功。
+- iOS 模拟器用 `go tool nsgo build -embed -target ios .` 构建 XCFramework，由工作流生成 Swift 外壳。播放时间前进后才通过。设置 `NSGO_PILOT_LIVE=1` 可在离线流程结束后额外诊断真实源。
+
+## 带 Cookie 的播放
+
+Swift 直连播放器目前接收播放 URL 和声明的请求头。需要源分区 Cookie 的视频在接通 Go 媒体代理或等价传输前，仍需同步 Swift 侧契约。每一跳及每段媒体均须按目标 URL 匹配分区 Cookie，转发 Range 并在播放关闭时取消请求。
+
+## Core 本地联调
+
+`go.mod` 临时从同级目录 `../VeneraCat Core` 读取共享宿主。发布时先推送 Core，再移除本地 replace，并更新依赖到已发布提交的 Go 伪版本。
+
+## 离线媒体夹具
+
+`app/testdata/hls` 复用 Nekophage 的 fMP4 HLS 片段。画面来自 **Big Buck Bunny**，© 2008 Blender Foundation，[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)。片段做了缩放、压缩和分段，无音轨。
 
 ## 许可
 

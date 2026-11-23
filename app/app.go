@@ -8,11 +8,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
 
-	vc "github.com/laincat/nsgo-pilot/internal/core"
-	"github.com/laincat/nsgo-pilot/internal/library"
-	"github.com/laincat/veneracat-core/webcookie"
+	vc "github.com/laincat/veneracat-core/gohost"
+	"github.com/laincat/veneracat-core/gohost/library"
 	"github.com/nsgo-dev/nsgo/base"
 	"github.com/nsgo-dev/nsgo/core"
 	"github.com/nsgo-dev/nsgo/ui"
@@ -25,44 +26,68 @@ const sourceLevel = "1.6.3"
 // officialIndex is the official comic source index.
 const officialIndex = "https://raw.githubusercontent.com/venera-app/venera-configs/main/index.json"
 
-// App is one Core profile and what the screens share.
+// App is one Core profile shared by its screens.
 type App struct {
-	Core    *vc.Core
-	Lib     *library.Library
-	cookies webcookie.Options
-	// changed bumps when the installed sources change.
-	changed *core.Signal[int]
-	// login carries a web view login's result to the autopilot: what it read,
-	// or why it could not.
-	login chan string
+	Core        *vc.Core
+	Lib         *library.Library
+	changed     *core.Signal[int]
+	loginActive bool
+	probe       *probeSession
+	closeOnce   sync.Once
 }
 
-// open runs off the engine's goroutine: restoring the sources runs their
-// scripts.
-func open(dataDir, cacheDir string) (*App, error) {
-	c, err := vc.Open(vc.Options{DataDir: filepath.Join(dataDir, "core"), Locale: "zh_CN", AppVersion: sourceLevel})
+func open(ctx context.Context, dataDir string, fixture bool) (*App, error) {
+	a := &App{}
+	if fixture {
+		root, err := os.MkdirTemp("", "nsgo-pilot-probe-")
+		if err != nil {
+			return nil, err
+		}
+		dataDir = root
+		a.probe = &probeSession{root: root, login: make(chan error, 1), details: make(chan error, 1), reader: make(chan error, 1), playback: make(chan error, 1)}
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	c, err := vc.Open(vc.Options{DataDir: filepath.Join(dataDir, "core"), Platform: platform, Locale: "zh_CN", AppVersion: sourceLevel})
 	if err != nil {
+		a.close()
 		return nil, err
 	}
-	lib := library.New(c)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	a.Core, a.Lib = c, library.New(c)
+	startup, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	failed, err := lib.Restore(ctx)
+	failed, err := a.Lib.Restore(startup)
+	if err == nil && a.probe != nil {
+		err = installProbe(startup, a)
+	}
+	if err == nil {
+		err = startup.Err()
+	}
 	if err != nil {
-		c.Close()
+		a.close()
 		return nil, err
 	}
 	for key, err := range failed {
 		log.Printf("source %s was not restored: %v", key, err)
 	}
-	// NSGo's WebView2 views keep their profile in the app's cache folder.
-	a := &App{Core: c, Lib: lib, cookies: webcookie.Options{WebView2Folder: filepath.Join(cacheDir, "WebView2")}, login: make(chan string, 1)}
-	if os.Getenv("NSGO_PILOT_PROBE") != "" {
-		if err := installProbe(ctx, a); err != nil {
-			log.Printf("probe sources: %v", err)
-		}
-	}
+	context.AfterFunc(ctx, a.close)
 	return a, nil
+}
+
+func (a *App) close() {
+	a.closeOnce.Do(func() {
+		if a.probe != nil && a.probe.server != nil {
+			_ = a.probe.server.Close()
+		}
+		if a.Core != nil {
+			_ = a.Core.Close()
+		}
+		if a.probe != nil {
+			_ = os.RemoveAll(a.probe.root)
+		}
+	})
 }
 
 // Root opens Core and shows the app once it is ready.
@@ -70,14 +95,16 @@ func Root(cx *core.Scope) core.Node {
 	colors := ui.ColorsOf(cx)
 	app := core.NewSignalFunc[*App](cx, nil, nil)
 	failure := core.NewSignal(cx, "")
-	dataDir, cacheDir := cx.DataDir(), cx.CacheDir()
+	ctx, dataDir := cx.Context(), cx.DataDir()
+	fixture := os.Getenv("NSGO_PILOT_PROBE") != "" || os.Getenv("NSGO_PILOT_AUTO") != ""
 	go func() {
-		a, err := open(dataDir, cacheDir)
+		a, err := open(ctx, dataDir, fixture)
 		cx.Post(func() {
 			if err != nil {
 				failure.Set("Core 打开失败：" + err.Error())
 				return
 			}
+			cx.OnQuit(func(context.Context) { a.close() })
 			app.Set(a)
 		})
 	}()
@@ -106,8 +133,8 @@ func shell(cx *core.Scope, a *App) core.Node {
 	a.changed = core.NewSignal(cx, 0)
 	nav := base.NewNav(cx, route{})
 	tab := core.NewSignal(cx, 0)
-	if os.Getenv("NSGO_PILOT_AUTO") != "" {
-		go autopilot(cx, a, nav, tab)
+	if a.probe != nil && os.Getenv("NSGO_PILOT_AUTO") != "" {
+		go autopilot(cx.Context(), cx, a, nav)
 	}
 	return nav.Stack(core.Style{FlexGrow: 1}, func(cx *core.Scope, r route, _ func() int) base.NavPage {
 		back := func() { nav.Pop(1) }

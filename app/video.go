@@ -129,8 +129,18 @@ func playPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 	play := core.NewSignalFunc[*video.Play](cx, nil, nil)
 	status := core.NewSignal(cx, "正在取播放地址…")
 	load(cx, func(ctx context.Context) (*video.Play, error) {
-		return a.Core.VideoPlay(ctx, r.Key, r.ID, r.Line, r.Episode)
+		p, err := a.Core.VideoPlay(ctx, r.Key, r.ID, r.Line, r.Episode)
+		if err == nil && a.probe != nil && r.Key == "probe_video" && runtime.GOOS != "ios" {
+			err = verifyProbeMedia(ctx, a, p.URL)
+		}
+		return p, err
 	}, func(p *video.Play, err error) {
+		if a.probe != nil && r.Key == "probe_video" && (err != nil || runtime.GOOS != "ios") {
+			if err == nil {
+				log.Print("pilot: HLS playlists and media byte range fetched")
+			}
+			reportProbe(a.probe.playback, err)
+		}
 		if err == nil {
 			log.Printf("pilot: play %s/%s: %s %s", r.Key, r.Episode, p.Format, p.URL)
 		}
@@ -167,6 +177,14 @@ func playPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 				Style:     core.Style{Width: core.Pct(100), AspectRatio: 16.0 / 9},
 				OnEvent: func(name string, data any) {
 					log.Printf("pilot: player %s: %v", name, data)
+					if a.probe != nil && r.Key == "probe_video" {
+						switch name {
+						case "progress":
+							reportProbe(a.probe.playback, nil)
+						case "error":
+							reportProbe(a.probe.playback, fmt.Errorf("native player: %v", data))
+						}
+					}
 					status.Set(fmt.Sprintf("播放器 %s：%v", name, data))
 				},
 			}

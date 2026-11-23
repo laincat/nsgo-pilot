@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
 	"log"
 	"strings"
 
-	vc "github.com/laincat/nsgo-pilot/internal/core"
+	vc "github.com/laincat/veneracat-core/gohost"
 	"github.com/laincat/veneracat-core/plugin"
 	"github.com/nsgo-dev/nsgo/base"
 	"github.com/nsgo-dev/nsgo/core"
@@ -131,6 +133,13 @@ func detailPage(cx *core.Scope, a *App, r route, push func(route), back func()) 
 	details := core.NewSignalFunc(cx, vc.Details{}, nil)
 	status := core.NewSignal(cx, "正在读取详情…")
 	load(cx, func(ctx context.Context) (vc.Details, error) { return a.Core.Details(ctx, r.Key, r.ID) }, func(d vc.Details, err error) {
+		if a.probe != nil && r.Key == "probe" {
+			probeErr := err
+			if probeErr == nil && len(d.Chapters) == 0 {
+				probeErr = fmt.Errorf("probe details have no chapters")
+			}
+			reportProbe(a.probe.details, probeErr)
+		}
 		if err != nil {
 			log.Printf("pilot: details %s/%s failed: %v", r.Key, r.ID, err)
 			status.Set("详情读取失败：" + err.Error())
@@ -196,6 +205,13 @@ func readerPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 	pages := core.NewSignalFunc[[]string](cx, nil, nil)
 	status := core.NewSignal(cx, "正在读取章节…")
 	load(cx, func(ctx context.Context) ([]string, error) { return a.Core.ChapterImages(ctx, r.Key, r.ID, r.Episode) }, func(p []string, err error) {
+		if a.probe != nil && r.Key == "probe" {
+			if err != nil {
+				reportProbe(a.probe.reader, err)
+			} else if len(p) == 0 {
+				reportProbe(a.probe.reader, fmt.Errorf("probe chapter has no pages"))
+			}
+		}
 		if err != nil {
 			log.Printf("pilot: chapter %s/%s failed: %v", r.Key, r.Episode, err)
 			status.Set("章节读取失败：" + err.Error())
@@ -222,16 +238,25 @@ func readerPage(cx *core.Scope, a *App, r route, back func()) base.NavPage {
 					pic := core.NewSignalFunc(cx, picture{}, nil)
 					failure := core.NewSignal(cx, "")
 					load(cx, func(ctx context.Context) (picture, error) {
-						return fetchPicture(ctx, func(ctx context.Context) ([]byte, string, error) {
+						pic, err := fetchPicture(ctx, func(ctx context.Context) ([]byte, string, error) {
 							return a.Core.FetchImage(ctx, r.Key, address, r.ID, r.Episode)
 						})
+						if err == nil && a.probe != nil && r.Key == "probe" && index == 0 {
+							_, _, err = image.Decode(bytes.NewReader(pic.data))
+						}
+						return pic, err
 					}, func(p picture, err error) {
+						if a.probe != nil && r.Key == "probe" && index == 0 {
+							if err == nil {
+								log.Printf("pilot: page 1 decoded %vx%v", p.size.Width, p.size.Height)
+							}
+							reportProbe(a.probe.reader, err)
+						}
 						if err != nil {
 							log.Printf("pilot: page %d failed: %v", index+1, err)
 							failure.Set(fmt.Sprintf("第 %d 页加载失败：%v", index+1, err))
 							return
 						}
-						log.Printf("pilot: page %d decoded %vx%v", index+1, p.size.Width, p.size.Height)
 						pic.Set(p)
 					})
 					return core.Show{
